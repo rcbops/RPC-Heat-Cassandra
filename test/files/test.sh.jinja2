@@ -1,0 +1,28 @@
+{%- set host = salt['grains.get']('host') -%}
+{%- set interface = salt['pillar.get']('interfaces:public') -%}
+{%- set ip = salt['network.ipaddrs'](interface)|first -%}
+#!/bin/bash
+KEYSPACE="testkeyspace"
+TABLE="testtable"
+HOST="{{ ip }}"
+NODE="{{ host }}"
+
+echo "Creating keyspace...."
+cqlsh ${HOST} -e "
+CREATE KEYSPACE ${KEYSPACE} WITH replication = {
+  'class': 'SimpleStrategy',
+  'replication_factor': '1'
+};"
+
+echo "Creating table ...."
+cqlsh ${HOST} -k ${KEYSPACE}  -e "CREATE TABLE ${TABLE} (
+  node text,
+  PRIMARY KEY (node)
+);"
+
+
+echo "Creating node record ...."
+cqlsh ${HOST} -k ${KEYSPACE} -e "INSERT INTO ${TABLE} (node) VALUES ('${NODE}');"
+
+echo "Selecting records...."
+cqlsh ${HOST} -k ${KEYSPACE} -e "SELECT * FROM ${TABLE};"
