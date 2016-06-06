@@ -24,15 +24,16 @@
 {%- do config.update(pc) %}
 
 {% set cassandra_ips = salt['mine.get']('roles:cassandra', 'internal_ips', 'grain') %}
-{% set cassandra_hosts = salt['mine.get']('roles:cassandra', 'host', 'grain').values() %}
-{% do cassandra_hosts.sort() %}
+{% set cassandra_hosts = salt['mine.get']('roles:cassandra', 'host', 'grain') %}
 {% set cassandra_hosts_dict = {} %}
-{% for host in cassandra_hosts %}
-    {% do cassandra_hosts_dict.update({host: (cassandra_ips[host])|first}) %}
+{% for id, host in cassandra_hosts.iteritems() %}
+    {% do cassandra_hosts_dict.update({host: (cassandra_ips[id])|first}) %}
 {% endfor %}
+{% set cassandra_ids = cassandra_hosts.keys() %}
+{% do cassandra_ids.sort() %}
 {% set seed_ips = [] %}
-{% for seed_host in cassandra_hosts[:2] %}
-    {% do seed_ips.append(cassandra_ips[seed_host]|first) %}
+{% for seed_id in cassandra_ids[:2] %}
+    {% do seed_ips.append(cassandra_ips[seed_id]|first) %}
 {% endfor %}
 {% do config.update({'seeds': seed_ips}) %}
 
