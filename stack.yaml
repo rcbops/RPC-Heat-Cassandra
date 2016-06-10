@@ -1,0 +1,439 @@
+heat_template_version: 2015-04-30
+
+description: |
+  Heat template for cassandra.
+  Deploys a single salt-master node.
+  Deploys a variable number of cassandra nodes.
+
+parameter_groups:
+  - label: Sizing and location
+    description: What networks and how large of a vm.
+    parameters:
+      - keyname
+      - image
+      - flavor
+      - apps-network
+      - node-count
+
+  - label: Don't touch
+    description: These parameters should be left default except in special cases.
+    parameters:
+      - git-formula-repo
+
+parameters:
+
+  keyname:
+    type: string
+    label: SSH Keypair name.
+    description: Name of the ssh key used to ssh into mysql server.
+
+  image:
+    type: string
+    label: Image Name
+    description: Name of the trusty image that contains software config heat elements.
+
+  flavor:
+    type: string
+    label: Flavor
+    description: Flavor (size) for all virtual machines in this stack.
+    default: m1.small
+
+  apps-network:
+    type: string
+    label: Apps Network Name or UUID
+    description: Existing private network that is routable to a public network.
+    default: changeme
+
+  node-count:
+    type: number
+    default: 3
+    label: Number of Cassandra Nodes.
+    description: Number of Cassandra Nodes.
+
+  git-formula-repo:
+    type: string
+    label: Cassandra Formula Repo
+    description: Formula git repository. This should remain as default except for development.
+    default: https://github.com/rcbops/RPC-Heat-Cassandra.git
+
+resources:
+
+  # Security group
+  secgroup:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name:
+        str_replace:
+          template: cassandra-$stack_name$
+          params:
+            $stack_name$:
+              get_param: OS::stack_name
+      rules:
+        # SSH
+        - protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+        # Salt
+        - protocol: tcp
+          port_range_min: 4505
+          port_range_max: 4506
+        # storage_port
+        - protocol: tcp
+          port_range_min: 7000
+          port_range_max: 7000
+        # storage_port_ssl
+        - protocol: tcp
+          port_range_min: 7001
+          port_range_max: 7001
+        # client_port
+        - protocol: tcp
+          port_range_min: 9042
+          port_range_max: 9042
+        # thrift_port
+        - protocol: tcp
+          port_range_min: 9160
+          port_range_max: 9160
+
+  # Keypair for communicating between nodes within the stack.
+  # Will allow minions to ssh into the master and vice versa.
+  coms:
+    type: OS::Nova::KeyPair
+    properties:
+      save_private_key: true
+      name:
+        str_replace:
+          template: cassandra-key-$stack_name$
+          params:
+            $stack_name$:
+              get_param: OS::stack_name
+
+  # One port for the salt-master node
+  master-port:
+    type: OS::Neutron::Port
+    properties:
+      name:
+        str_replace:
+          template: cassandra-master-port-$stack_name$
+          params:
+            $stack_name$:
+              get_param: OS::stack_name
+      network_id:
+        get_param: apps-network
+      security_groups:
+        - get_resource: secgroup
+
+  # Software configuration script for the salt-master
+  config-salt-master:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      inputs:
+        - name: public_key
+        - name: git_formula_repo
+      config: |
+        #!/bin/bash
+        set -ex
+        logdir=/var/log/heat-deployments
+        prefix=${logdir}/config-salt-master
+        mkdir -p $logdir
+        exec &> >(tee -a ${prefix}.log)
+
+        [ -e ${prefix}.ran ] && exit 0
+        chmod -R 0600 ${logdir}
+        chmod 0700 /root/.ssh/coms_rsa
+        chmod 0600 /srv/pillar/cassandra.sls
+
+        # Add coms from minions to master
+        echo "$public_key" >> /root/.ssh/authorized_keys
+
+        # Install salt-master and git
+        echo "Install Salt Master"
+        add-apt-repository -y ppa:saltstack/salt2015-5
+        apt-get update
+        apt-get install -y --force-yes git salt-master
+
+        mkdir -p /srv/salt
+        echo -e 'file_roots:\n  base:\n    - /srv/salt' >> /etc/salt/master
+
+        git clone "${git_formula_repo}" /srv/salt/cassandra
+
+        # Finally - Restart salt service
+        service salt-master restart
+
+  # Software configuration for the salt minion.
+  # Installs salt minion and connects minion to master.
+  config-salt-minion:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      inputs:
+        - name: public_key
+        - name: master
+      config: |
+        #!/bin/bash
+        set -ex
+        logdir=/var/log/heat-deployments
+        prefix=${logdir}/config-salt-minion
+        mkdir -p $logdir
+        exec &> >(tee -a ${prefix}.log)
+        [ -e ${prefix}.ran ] && exit 0
+
+        chmod -R 0600 ${logdir}
+        chmod 0700 /root/.ssh/coms_rsa
+
+        # Add coms from minions to master
+        echo "$public_key" >> /root/.ssh/authorized_keys
+
+        # Install salt minion
+        add-apt-repository -y ppa:saltstack/salt2015-5
+        apt-get update
+        apt-get install -y --force-yes git salt-minion
+
+        echo master: $master >> /etc/salt/minion
+        service salt-minion restart
+
+        ssh-keyscan -H $master >> /root/.ssh/known_hosts
+
+        MASTER_PKI_PATH="/etc/salt/pki/master/minions/"
+        MASTER_PKI_PATH_PRE="/etc/salt/pki/master/minions_pre/"
+        MINION_PKI_PATH="/etc/salt/pki/minion/minion.pub"
+        HOSTNAME="$(python  -c 'import socket; print socket.getfqdn()')"
+
+        while [ ! -s ${MINION_PKI_PATH} ]; do
+            echo "Waiting for ${MINION_PKI_PATH} to have non-zero content."
+            sleep 2
+        done
+
+        cp $MINION_PKI_PATH /root/minion_key
+        scp -i /root/.ssh/coms_rsa /root/minion_key root@$master:/tmp/$HOSTNAME
+        ssh -i /root/.ssh/coms_rsa root@$master "mv /tmp/$HOSTNAME $MASTER_PKI_PATH$HOSTNAME; chmod 700 $MASTER_PKI_PATH$HOSTNAME"
+        rm /root/minion_key
+        if [ ! -f /etc/salt/master ]; then
+            rm /root/.ssh/coms_rsa
+        fi
+        service salt-minion restart
+        touch ${prefix}.ran
+
+  # Software deployment for salt-master. Deploys the salt-master software
+  # configuration.
+  deploy-salt-master:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        public_key:
+          get_attr:
+             - coms
+             - public_key
+        git_formula_repo:
+          get_param: git-formula-repo
+      config:
+        get_resource: config-salt-master
+      server:
+        get_resource: master
+
+  # The salt master instance
+  # Should have one floating ip
+  master:
+    type: OS::Nova::Server
+    properties:
+      key_name:
+        get_param: keyname
+      image:
+        get_param: image
+      flavor:
+        get_param: flavor
+      name:
+        str_replace:
+          template: cassandra-master-$stack_name$
+          params:
+            $stack_name$:
+              get_param: OS::stack_name
+
+      personality:
+        # Private key for ssh'ing into minions
+        /root/.ssh/coms_rsa:
+          get_attr:
+            - coms
+            - private_key
+
+        # The top.sls file for salt pillars.
+        # Dictates which minions get which pillars
+        /srv/pillar/top.sls: |
+          base:
+            'roles:cassandra':
+              - match: grain
+              - cassandra
+
+        # The top.sls file for salt states.
+        # Dictates which minions get which states.
+        /srv/salt/top.sls: |
+          base:
+            'roles:cassandra':
+              - match: grain
+              - cassandra.cassandra
+
+        # The app pillar. Describe interfaces and salt-mine functions.
+        /srv/pillar/cassandra.sls: |
+          cassandra:
+            version: 3.0.6
+            series: 30x
+            package_name: cassandra
+            conf_path: /etc/cassandra/cassandra.yaml
+            config:
+              cluster_name: 'cassandra'
+              data_file_directories:
+                - /var/lib/cassandra/data
+              commitlog_directory: /var/lib/cassandra/commitlog
+              saved_caches_directory: /var/lib/cassandra/saved_caches
+              endpoint_snitch: SimpleSnitch
+
+          interfaces:
+            public: eth0
+            private: eth0
+
+          mine_functions:
+            internal_ips:
+              mine_function: network.ipaddrs
+              interface: eth0
+            external_ips:
+              mine_function: network.ipaddrs
+              interface: eth0
+            id:
+              - mine_function: grains.get
+              - id
+            host:
+              - mine_function: grains.get
+              - host
+
+          user-ports:
+            ssh:
+              chain: INPUT
+              proto: tcp
+              dport: 22
+            salt-master:
+              chain: INPUT
+              proto: tcp
+              dport: 4505
+            salt-minion:
+              chain: INPUT
+              proto: tcp
+              dport: 4506
+            storage_port:
+              chain: INPUT
+              proto: tcp
+              dport: 7000
+            storage_port_ssl:
+              chain: INPUT
+              proto: tcp
+              dport: 7001
+            client_port:
+              chain: INPUT
+              proto: tcp
+              dport: 9042
+            thrift_port:
+              chain: INPUT
+              proto: tcp
+              dport: 9160
+
+      # Get access from the master-port
+      networks:
+        - port:
+            get_resource: master-port
+
+      # Using SoftwareConfigs - This needs to be set to SOFTWARE_CONFIG
+      user_data_format: SOFTWARE_CONFIG
+
+  cassandra-servers:
+    type: OS::Heat::ResourceGroup
+    depends_on: deploy-salt-master
+    properties:
+      count:
+        get_param: node-count
+      resource_def:
+        type: Salt::CassandraMinion
+        properties:
+          flavor:
+            get_param: flavor
+          stack-prefix:
+            str_replace:
+              template: cassandra-node-$stack_name$
+              params:
+                $stack_name$:
+                  get_param: OS::stack_name
+          private_key:
+            get_attr:
+              - coms
+              - private_key
+          public_key:
+            get_attr:
+              - coms
+              - public_key
+          image:
+            get_param: image
+          network:
+            get_param: apps-network
+          master:
+            get_attr:
+              - master
+              - first_address
+          minion-config:
+            get_resource: config-salt-minion
+          minion-roles: "cassandra"
+          security-group:
+            get_resource: secgroup
+
+  config-deploy:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: |
+        #!/bin/bash
+        set -ex
+        logdir=/var/log/heat-deployments
+        prefix=${logdir}/config-deploy
+        mkdir -p $logdir
+        exec &> >(tee -a ${prefix}.log)
+        [ -e ${prefix}.ran ] && exit 0
+        cd /srv/salt/cassandra
+        python start_cluster.py
+        sleep 90
+        salt '*' test.ping
+        salt '*' state.sls cassandra.test
+        touch ${prefix}.ran
+
+  deploy:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      config:
+        get_resource: config-deploy
+      server:
+        get_resource: master
+    depends_on:
+      - deploy-salt-master
+      - cassandra-servers
+
+outputs:
+  master-ip:
+    description: The ip address of the salt-master server.
+    value:
+      get_attr:
+        - master
+        - first_address
+
+  cassandra-ips:
+    description: IP addresses of the cassandra client servers.
+    value:
+      get_attr:
+        - cassandra-servers
+        - minion-ip
+
+  ssh_access:
+    description: How to ssh into the stack.
+    value:
+      str_replace:
+        template: ssh ubuntu@$master-ip$
+        params:
+          $master-ip$:
+            get_attr:
+              - master
+              - first_address

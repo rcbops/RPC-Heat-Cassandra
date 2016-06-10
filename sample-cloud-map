@@ -1,0 +1,30 @@
+minion-4gb:
+  - cassandra-1:
+      grains:
+        roles:
+          - cassandra
+
+  - cassandra-2:
+      grains:
+        roles:
+          - cassandra
+
+  - cassandra-3:
+      grains:
+        roles:
+          - cassandra
+
+  - cassandra-4:
+      grains:
+        roles:
+          - cassandra
+
+  - cassandra-5:
+      grains:
+        roles:
+          - cassandra
+
+  - cassandra-6:
+      grains:
+        roles:
+          - cassandra
