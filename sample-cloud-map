@@ -1,30 +1,30 @@
 minion-4gb:
-  - james-cassandra-1:
+  - cassandra-1:
       grains:
         roles:
           - cassandra
 
-  - james-cassandra-2:
+  - cassandra-2:
       grains:
         roles:
           - cassandra
 
-  - james-cassandra-3:
+  - cassandra-3:
       grains:
         roles:
           - cassandra
 
-  - james-cassandra-4:
+  - cassandra-4:
       grains:
         roles:
           - cassandra
 
-  - james-cassandra-5:
+  - cassandra-5:
       grains:
         roles:
           - cassandra
 
-  - james-cassandra-6:
+  - cassandra-6:
       grains:
         roles:
           - cassandra
